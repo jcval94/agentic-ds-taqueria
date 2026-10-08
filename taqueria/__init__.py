@@ -23,7 +23,7 @@ import os as _os
 import re as _re
 import urllib.request as _urlreq
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 CURSO_NOMBRE = "The Agentic Data Scientist"
 ESCUELA = "Augmented Learning Labs"
 
@@ -263,6 +263,7 @@ class Sesion:
         self._pausa_hasta = 0.0
         self._material = None
         self._vistas = set()
+        self.etiquetas = {}
 
     # -- HTTP --------------------------------------------------------------
     def _http(self, metodo, ruta, cuerpo=None, prefer=None, reintento=True, intentos=3):
@@ -673,8 +674,11 @@ class Sesion:
                  if filas else "<p>No hay alumnos registrados todavía.</p>")
 
         etiquetas = {"hipotesis_razon": "Razón de la hipótesis", "explicacion": "Explicación antes de la pista", "ejemplo": "Ejemplo para su trabajo"}
+        etiquetas.update(self.etiquetas or {})
+        orden = list(self.etiquetas or {}) + [p for p in ["explicacion", "ejemplo", "hipotesis_razon"] if p not in (self.etiquetas or {})]
+        orden += sorted({r["pregunta"] for r in resps} - set(orden))
         bloques = ""
-        for pregunta in ["explicacion", "ejemplo", "hipotesis_razon"]:
+        for pregunta in orden:
             lista = [r for r in resps if r["pregunta"] == pregunta and r["usuario"] in por_id]
             if not lista:
                 continue
