@@ -23,7 +23,7 @@ import os as _os
 import re as _re
 import urllib.request as _urlreq
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 CURSO_NOMBRE = "The Agentic Data Scientist"
 ESCUELA = "Augmented Learning Labs"
 
@@ -148,6 +148,14 @@ def _md(texto):
     return "".join(salida)
 
 
+def _segundos_desde(iso):
+    try:
+        t = _dt.datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        return (_dt.datetime.now(_dt.timezone.utc) - t).total_seconds()
+    except Exception:
+        return float("inf")
+
+
 def _hace(iso):
     try:
         t = _dt.datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
@@ -168,10 +176,11 @@ def _hace(iso):
 class ErrorBackend(Exception):
     """Error al hablar con la base. temporal=True si vale la pena reintentar más tarde."""
 
-    def __init__(self, mensaje, codigo=None, temporal=False):
+    def __init__(self, mensaje, codigo=None, temporal=False, causa=None):
         super().__init__(mensaje)
         self.codigo = codigo
         self.temporal = temporal
+        self.causa = causa
 
 
 COLA_ARCHIVO = ".tdd_pendientes.json"
@@ -193,7 +202,7 @@ def _leer_credenciales():
     except ImportError:
         ident, clave = _os.environ.get("TDD_ID"), _os.environ.get("TDD_CLAVE")
         if ident and clave:
-            return ident.strip(), clave, None, None
+            return _limpiar_id(ident), clave.strip(), None, None
         return None, None, "No estás en Colab y no hay variables TDD_ID y TDD_CLAVE.", "fuera_de_colab"
     try:
         ident = userdata.get("TDD_ID")
@@ -204,9 +213,14 @@ def _leer_credenciales():
         return None, None, "Tus secretos existen, pero este cuaderno no tiene permiso para leerlos.", "sin_permiso"
     except Exception:
         return None, None, "No pude leer tus secretos de Colab.", "otro"
-    if not ident or not clave:
+    if not (ident or "").strip() or not (clave or "").strip():
         return None, None, "Uno de tus secretos está vacío.", "secreto_vacio"
-    return ident.strip(), clave, None, None
+    return _limpiar_id(ident), clave.strip(), None, None
+
+
+def _limpiar_id(ident):
+    """Quita espacios, saltos de línea y comillas que a veces se pegan al copiar el ID."""
+    return ident.strip().strip("\"'“”‘’ ").strip()
 
 
 class Sesion:
@@ -279,12 +293,14 @@ class Sesion:
                     if r.status_code == 204 or not r.content:
                         return None
                     return r.json()
+                causa = None
                 try:
                     detalle = r.json()
                     msg = detalle.get("message") or detalle.get("msg") or detalle.get("error_description") or str(detalle)
+                    causa = detalle.get("error_code") or detalle.get("code")
                 except Exception:
                     msg = r.text[:200]
-                error = ErrorBackend("%s %s" % (r.status_code, msg), r.status_code, r.status_code in _TEMPORALES)
+                error = ErrorBackend("%s %s" % (r.status_code, msg), r.status_code, r.status_code in _TEMPORALES, causa)
             if not error.temporal or intento == intentos - 1:
                 raise error
             time.sleep(espera)
@@ -310,9 +326,14 @@ class Sesion:
         try:
             self._entrar(correo, clave)
         except ErrorBackend as e:
-            if e.codigo == 400:
-                self.motivo = ("Tu ID o tu clave no coinciden. En TDD_ID pon exactamente lo que te dio tu profesor "
-                               "(puede ser tu correo de Gmail) y revisa TDD_CLAVE.")
+            if e.codigo == 400 and e.causa == "email_not_confirmed":
+                self.motivo = ("Tu cuenta (%s) existe pero su correo no está confirmado. Pídele a tu profesor que "
+                               "vuelva a ejecutar el paso 5 del instalador." % correo)
+                self.motivo_codigo = "otro"
+            elif e.codigo == 400:
+                self.motivo = ("Tu ID o tu clave no coinciden. Intenté entrar como <b>%s</b>. En TDD_ID pon exactamente "
+                               "lo que te dio tu profesor (puede ser tu correo de Gmail) y revisa TDD_CLAVE, sin comillas."
+                               % esc(correo))
                 self.motivo_codigo = "clave_incorrecta"
             else:
                 self.motivo = "No pude conectarme al registro del curso. " + str(e)
@@ -536,7 +557,7 @@ class Sesion:
         total = len(self.secciones) or 9
         if self.modo == "invitado":
             cuerpo = ("<p><b>Estás en modo invitado:</b> el cuaderno funciona completo, pero tu avance no cuenta para tu calificación.</p>"
-                      "<p>%s</p>" % esc(self.motivo) +
+                      "<p>%s</p>" % (self.motivo if self.motivo_codigo == "clave_incorrecta" else esc(self.motivo)) +
                       "<p>Para guardarlo: abre el panel <b>Secretos</b> (la llave en la barra izquierda), crea <code>TDD_ID</code> "
                       "y <code>TDD_CLAVE</code> con los datos que te dio tu profesor, activa <b>Acceso del cuaderno</b> "
                       "y vuelve a ejecutar esta celda.</p>")
@@ -615,10 +636,13 @@ class Sesion:
         total = len(self.secciones) or 9
         abrieron = sum(1 for p in alumnos if p["id"] in av)
         completaron = sum(1 for p in alumnos if av.get(p["id"], {}).get("completo"))
+        activos = sum(1 for p in alumnos if _segundos_desde(av.get(p["id"], {}).get("ultimo_evento")) < 900)
 
         chips = ('<div class="chips"><div class="chip"><span class="tdd-cifra">%d</span><br>alumnos</div>'
                  '<div class="chip"><span class="tdd-cifra">%d</span><br>abrieron el caso</div>'
-                 '<div class="chip"><span class="tdd-cifra">%d</span><br>lo completaron</div></div>') % (len(alumnos), abrieron, completaron)
+                 '<div class="chip"><span class="tdd-cifra">%d</span><br>lo completaron</div>'
+                 '<div class="chip"><span class="tdd-cifra">%d</span><br>activos ahora<br><small>últimos 15 min</small></div></div>'
+                 ) % (len(alumnos), abrieron, completaron, activos)
 
         conteo = {}
         for u, op in primera_hip.items():
@@ -640,6 +664,8 @@ class Sesion:
                 vistas = min(int(a.get("secciones_vistas") or 0), total)
                 estado = "Completo ✓" if a.get("completo") else "En curso"
                 cuando = _hace(a.get("ultimo_evento"))
+                if _segundos_desde(a.get("ultimo_evento")) < 900:
+                    estado = "<b style='color:%s'>● activo</b> · %s" % (NOPAL, estado)
             barra = '<div class="barra" style="width:120px"><div style="width:%d%%;background:%s"></div></div>' % (round(100 * vistas / total), NOPAL)
             filas += "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s %d/%d</td><td>%s</td><td>%s</td></tr>" % (
                 esc(p["alumno_id"]), esc(p["nombre"]), esc(p.get("grupo") or ""), barra, vistas, total, estado + (" · " + cuando if cuando else ""), esc(primera_hip.get(p["id"], "")))
