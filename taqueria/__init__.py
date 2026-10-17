@@ -23,9 +23,11 @@ import os as _os
 import re as _re
 import urllib.request as _urlreq
 
-VERSION = "0.4.2"
+VERSION = "0.5.0"
 CURSO_NOMBRE = "The Agentic Data Scientist"
 ESCUELA = "Augmented Learning Labs"
+TUTORIAL_URL = "https://learninglabs.pages.dev/colab.html"
+_ORDINAL = {1: "primer", 2: "segundo", 3: "tercer", 4: "cuarto", 5: "quinto"}
 
 # --------------------------------------------------------------------------- estilo
 
@@ -262,6 +264,7 @@ class Sesion:
         self._cola = []
         self._pausa_hasta = 0.0
         self._material = None
+        self._retos = None
         self._vistas = set()
         self.etiquetas = {}
 
@@ -454,7 +457,9 @@ class Sesion:
 
     def _encolar(self, tabla, datos):
         import uuid
-        datos = dict(datos, id_cliente=str(uuid.uuid4()), sesion=self.sesion_id, creado_cliente=_ahora_iso())
+        datos = dict(datos, sesion=self.sesion_id)
+        datos.setdefault("id_cliente", str(uuid.uuid4()))
+        datos.setdefault("creado_cliente", _ahora_iso())
         self._cola.append({"t": tabla, "d": datos})
         if len(self._cola) > 2000:
             del self._cola[: len(self._cola) - 2000]
@@ -464,11 +469,13 @@ class Sesion:
         self._guardar_cola()
         return False
 
-    def registrar(self, seccion, tipo="seccion", valor=None):
+    def registrar(self, seccion, tipo="seccion", valor=None, id_cliente=None):
         """Guarda un evento. Nunca interrumpe al alumno: si falla, queda en la cola y se reintenta."""
         if seccion and tipo == "seccion":
             self._vistas.add(seccion)
         evento = {"caso": self.caso, "seccion": seccion, "tipo": tipo, "valor": valor or {}, "version": self.version}
+        if id_cliente:
+            evento["id_cliente"] = id_cliente
         if self.modo == "invitado":
             if not self.registrar_invitados or not self.url or not self.clave_publica:
                 return False
@@ -511,6 +518,103 @@ class Sesion:
     def completar(self):
         ok = self.registrar("cierre", "completo")
         return self.sincronizar() and ok
+
+    # -- retos ---------------------------------------------------------------
+    def reto(self, reto, respuesta, pista=None):
+        """Envía la respuesta de un reto y dice al momento si acertó y cuántos bits vale.
+
+        La respuesta correcta nunca está en el cuaderno: la califica la base (intentar_reto). Si no hay conexión,
+        el intento queda en la cola y la base lo califica cuando llegue. En modo invitado no se puede comprobar.
+        Devuelve el resultado de la base (dict) o None si no se pudo comprobar.
+        """
+        import uuid
+        dada = str(respuesta if respuesta is not None else "").strip()
+        if not dada or dada.startswith("Elige"):
+            mostrar(tarjeta("Reto", "<p>Elige o escribe tu respuesta arriba y vuelve a ejecutar la celda con ▶.</p>", TINTA_SUAVE))
+            return None
+        if self.modo == "invitado":
+            self.registrar(reto, "control", {"intento": True})
+            mostrar(tarjeta("Reto sin comprobar",
+                            "<p>En modo invitado no puedo decirte si acertaste: la respuesta correcta vive en la base del curso y solo "
+                            "se consulta con tus secretos. Puedes seguir con el caso sin problema.</p>"
+                            "<p>Para que tus retos cuenten, pon tus secretos con el <a href='%s' target='_blank' rel='noopener'>tutorial "
+                            "de Colab</a> y vuelve a ejecutar la primera celda.</p>" % esc(TUTORIAL_URL), SALSA_TEXTO))
+            return None
+        ident = str(uuid.uuid4())
+        cuerpo = {"p_caso": self.caso, "p_reto": reto, "p_respuesta": dada[:200], "p_id_cliente": ident,
+                  "p_sesion": self.sesion_id, "p_version": self.version, "p_creado_cliente": _ahora_iso()}
+        try:
+            res = self._http("POST", "/rest/v1/rpc/intentar_reto", cuerpo, intentos=2)
+        except ErrorBackend as e:
+            if e.temporal or e.codigo == 404:
+                # Sin conexión, o la base todavía no tiene intentar_reto: el intento se guarda como evento (mismo id,
+                # así que si la base ya lo había recibido no se duplica) y se califica al llegar.
+                guardado = self.registrar(reto, "control", {"respuesta": dada[:200]}, id_cliente=ident)
+                mostrar(tarjeta("Respuesta guardada sin comprobar",
+                                "<p>No pude comprobarla en este momento. %s Vuelve a ejecutar la celda más tarde para ver si acertaste: "
+                                "tu primer intento ya quedó contado.</p>" % (
+                                    "Ya está en tu registro y se calificará sola." if guardado else
+                                    "Quedó en la cola y se enviará sola cuando haya conexión."), COMAL_TEXTO))
+                return None
+            mensaje = str(e).split(" ", 1)[1] if str(e)[:3].isdigit() else str(e)
+            mostrar(tarjeta("Reto", "<p>%s</p>" % esc(mensaje), SALSA_TEXTO))
+            return None
+        self._mostrar_reto(res or {}, pista)
+        if self.modo == "docente":
+            self._nota_reto(reto)
+        return res
+
+    def _mostrar_reto(self, r, pista):
+        if not r.get("existe"):
+            return mostrar(tarjeta("Respuesta guardada",
+                                   "<p>Tu respuesta quedó en tu registro, pero este reto todavía no tiene respuesta correcta en la base. "
+                                   "Cuando tu profesor la cargue, se calificará sola con la regla de siempre.</p>", TINTA_SUAVE))
+        n, primer = int(r.get("intento") or 0), r.get("primer_acierto")
+        dif = int(r.get("dificultad") or 1)
+        nivel = "<span title='Dificultad %d de 3'>%s</span>" % (dif, "★" * dif + "☆" * (3 - dif))
+        pista_html = "<p><b>Pista:</b> %s</p>" % esc(pista) if pista else ""
+        expl = "<p><b>Por qué:</b> %s</p>" % esc(r["explicacion"]) if r.get("explicacion") else ""
+        if r.get("acierto") and primer == n:
+            titulo, color = "¡Reto superado!", NOPAL_TEXTO
+            cuerpo = ("<p><span class='tdd-cifra'>+%d</span> bits</p><p>%s Acertaste en tu %s intento%s.</p>%s" % (
+                r.get("bits", 0), nivel, _ORDINAL.get(n, "%d.º" % n),
+                "" if n == 1 else " (al primero valía %d)" % r.get("bits_max", 0), expl))
+        elif r.get("acierto"):
+            titulo, color = "Correcto", NOPAL_TEXTO
+            cuerpo = (("<p>Ya lo habías resuelto en tu %s intento: tus %d bits se quedan.</p>" % (_ORDINAL.get(primer, "%d.º" % primer), r.get("bits", 0)))
+                      if primer else "<p>Lo resolviste después del quinto intento: este reto ya no da bits, pero ahora sí lo dominas.</p>") + expl
+        elif primer:
+            titulo, color = "Esa no es", COMAL_TEXTO
+            cuerpo = ("<p>Esta respuesta no es la correcta, pero ya habías resuelto el reto en tu %s intento: tus %d bits se quedan.</p>"
+                      % (_ORDINAL.get(primer, "%d.º" % primer), r.get("bits", 0))) + expl
+        elif r.get("siguiente_bits"):
+            titulo, color = "Todavía no", SALSA_TEXTO
+            cuerpo = ("<p>%s Intento %d. Equivocarte no resta: si aciertas en el siguiente, ganas <b>%d bits</b>.</p>%s"
+                      % (nivel, n, r["siguiente_bits"], pista_html))
+        else:
+            titulo, color = "Todavía no", SALSA_TEXTO
+            cuerpo = ("<p>Intento %d. Después de cinco intentos el reto ya no da bits, pero puedes seguir intentando para aprenderlo.</p>%s%s"
+                      % (n, pista_html, expl))
+        mostrar(tarjeta(titulo, cuerpo, color))
+
+    def _nota_reto(self, reto):
+        """Modo docente: respuesta correcta y cómo le va al grupo en ese reto."""
+        try:
+            if self._retos is None:
+                self._retos = {(x["caso"], x["reto"]): x for x in self._http("POST", "/rest/v1/rpc/docente_retos", {}, intentos=2) or []}
+            x = self._retos.get((self.caso, reto))
+        except ErrorBackend:
+            x = None
+        if not x:
+            return
+        tol = float(x.get("tolerancia") or 0)
+        acierto = x.get("acierto_primer")
+        mostrar(tarjeta("Para ti: reto %s" % esc(reto),
+                        "<p><b>Respuesta correcta:</b> %s%s · dificultad %s</p><p>%d alumno(s) lo intentaron; %d lo resolvieron%s.</p>" % (
+                            esc(x.get("respuesta")), (" ± %g" % tol) if tol else "", x.get("dificultad"), int(x.get("alumnos") or 0),
+                            int(x.get("acertaron") or 0),
+                            "" if acierto is None else "; %d%% acertó al primer intento" % round(float(acierto) * 100)),
+                        COMAL, "tdd-docente"))
 
     def avance(self):
         if self.modo == "invitado":
@@ -561,7 +665,8 @@ class Sesion:
                       "<p>%s</p>" % (self.motivo if self.motivo_codigo == "clave_incorrecta" else esc(self.motivo)) +
                       "<p>Para guardarlo: abre el panel <b>Secretos</b> (la llave en la barra izquierda), crea <code>TDD_ID</code> "
                       "y <code>TDD_CLAVE</code> con los datos que te dio tu profesor, activa <b>Acceso del cuaderno</b> "
-                      "y vuelve a ejecutar esta celda.</p>")
+                      "y vuelve a ejecutar esta celda. Paso a paso, con imágenes: <a href='%s' target='_blank' rel='noopener'>"
+                      "tutorial de Colab</a>.</p>" % esc(TUTORIAL_URL))
             return mostrar(banderas() + tarjeta("Modo invitado", cuerpo + self._aviso(), SALSA_TEXTO))
         av = self.avance()
         vistas = int(av.get("secciones_vistas") or 0)
