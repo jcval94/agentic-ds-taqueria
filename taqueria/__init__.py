@@ -9,6 +9,8 @@ Qué hace:
   y los eventos esperan en una cola.
 - En modo invitado registra, sin identidad, qué secciones se abren y por qué no hubo sesión.
 - Muestra el modo docente solo a la cuenta docente; la base de datos lo hace cumplir.
+- Anima el caso como un videojuego de 8 bits (cine): franjas de nivel, tableros que se llenan, barras que crecen,
+  sellos que caen. Todo se ve completo aunque no haya JavaScript y respeta «reducir movimiento».
 
 Qué NO hace:
 - No guarda ni imprime la clave del alumno.
@@ -23,7 +25,7 @@ import os as _os
 import re as _re
 import urllib.request as _urlreq
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 CURSO_NOMBRE = "The Agentic Data Scientist"
 ESCUELA = "Augmented Learning Labs"
 TUTORIAL_URL = "https://learninglabs.pages.dev/colab.html"
@@ -60,6 +62,9 @@ _CSS = """
 .tdd .chip { border: 3px solid currentColor; padding: 6px 12px; }
 .tdd p { margin: 0 0 8px; }
 .tdd ul { margin: 0 0 8px 20px; padding: 0; }
+.tdd-card, .tdd-comanda, .tdd-docente { animation: tdd-entra .32s steps(4) both; }
+@keyframes tdd-entra { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .tdd-card, .tdd-comanda, .tdd-docente { animation: none; } }
 </style>
 """ % {"tinta": TINTA, "sup": SUPERFICIE, "fondo": FONDO, "borde": BORDE}
 
@@ -173,6 +178,545 @@ def _hace(iso):
     return "hace %d días" % (seg // 86400)
 
 
+# --------------------------------------------------------------------------- cine: dinamismo 8 bits
+#
+# Pantallas de arcade dentro del cuaderno: la misma sensación de videojuego de la intro del caso en la página.
+# Reglas:
+# - Todo se dibuja ya en su estado final (HTML y SVG). Si el navegador no corre JavaScript (vista previa de GitHub,
+#   pruebas, lector de pantalla) se ve completo; con JavaScript, el script lo esconde y lo anima.
+# - Con «reducir movimiento» del sistema no hay animación.
+# - Nada se descarga de terceros salvo las letras del curso (las mismas de mostrar()). No guarda nada ni registra nada.
+# - Los textos en letra pixel (títulos, sellos, rótulos de SVG) van sin acentos ni eñe.
+
+PANTALLA, CASILLA, PAPEL, MANILA = TINTA, "#3a4466", "#fffbee", "#e8c77a"
+
+_CINE_CSS = """
+<style>
+.cine { position: relative; overflow: hidden; background: %(pantalla)s; color: %(fondo)s; border: 4px solid %(tinta)s;
+  box-shadow: 6px 6px 0 %(comal)s; padding: 16px 18px 14px; margin: 8px 8px 18px 0; max-width: 780px;
+  font-family: 'Atkinson Hyperlegible', system-ui, sans-serif; font-size: 17px; line-height: 1.5; }
+.cine-t { font-family: 'Press Start 2P', monospace; font-size: 12px; line-height: 1.7; color: %(comal)s; margin: 0 0 10px; padding-right: 128px; }
+.cine-pie { font-size: 15px; color: #cfd6ea; margin: 8px 0 0; }
+.cine svg { display: block; width: 100%%; height: auto; shape-rendering: crispEdges; }
+.cine svg text { shape-rendering: auto; }
+.cine-otra { position: absolute; top: 10px; right: 10px; font-family: 'Press Start 2P', monospace; font-size: 9px;
+  background: transparent; color: %(fondo)s; border: 3px solid %(fondo)s; padding: 6px 8px; cursor: pointer; }
+.cine-otra:hover { color: %(comal)s; border-color: %(comal)s; }
+.cine-otra:focus-visible { outline: 3px solid %(comal)s; outline-offset: 2px; }
+.cine.con-sello { padding-bottom: 74px; }
+.cine-fila { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+.cine-fila > svg { width: 170px; flex: 0 0 auto; }
+.cine-texto { flex: 1 1 300px; min-width: 240px; }
+.cine-texto p { margin: 0 0 8px; min-height: 1.5em; }
+.cine-sello { position: absolute; right: 22px; bottom: 18px; transform: rotate(-9deg); border: 4px solid currentColor;
+  padding: 8px 12px; font-family: 'Press Start 2P', monospace; font-size: 13px; line-height: 1.3; background: rgba(27,34,54,.55); }
+.cine-claro { background: %(sup)s; color: %(tinta)s; box-shadow: 6px 6px 0 %(tinta)s; border-top: 6px dashed %(tinta)s; }
+.cine-claro .cine-t { color: %(salsa_t)s; }
+.cine-claro .cine-sello { background: rgba(255,251,238,.7); }
+.cine-claro .cine-otra { color: %(tinta)s; border-color: %(tinta)s; }
+.cine-num { font-family: 'VT323', monospace; font-size: clamp(40px, 11vw, 64px); line-height: 1; color: %(comal)s; }
+.cine-chip { font-family: 'Press Start 2P', monospace; font-size: 10px; border: 3px solid currentColor; padding: 6px 8px; }
+.cine-nivel { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 10px 14px; box-shadow: 5px 5px 0 %(comal)s;
+  animation: cine-desliza .45s steps(6) both; }
+.cine-nivel .cine-t { margin: 0; padding: 0; color: %(fondo)s; }
+.cine-prog { flex: 1 1 140px; min-width: 120px; height: 12px; border: 3px solid %(fondo)s; }
+.cine-prog i { display: block; height: 100%%; background: %(nopal)s; animation: cine-llena 1.1s steps(10) .25s both; }
+.cine-moneda { display: inline-block; width: 14px; height: 14px; background: %(comal)s; box-shadow: inset -3px -3px 0 %(comal_t)s; margin-right: 4px; }
+.cine-js .cine-oculto { opacity: 0; }
+.cine-golpe { animation: cine-golpe .32s steps(5) both; }
+.cine-aparece { animation: cine-aparece .3s steps(4) both; }
+.cine-tiembla { animation: cine-tiembla .42s steps(1) 1; }
+.cine-entra { animation: cine-entra .5s steps(6) both; }
+.cine-confeti { position: absolute; width: 8px; height: 8px; top: -10px; animation: cine-cae 1.6s steps(12) forwards; pointer-events: none; }
+@keyframes cine-golpe { 0%% { opacity: 0; transform: rotate(-9deg) scale(2.6); } 60%% { opacity: 1; } 100%% { opacity: 1; transform: rotate(-9deg) scale(1); } }
+@keyframes cine-aparece { from { opacity: 0; transform: scale(.4); } to { opacity: 1; transform: scale(1); } }
+@keyframes cine-tiembla { 0%% { transform: translate(4px,-3px); } 20%% { transform: translate(-5px,3px); } 40%% { transform: translate(4px,4px); }
+  60%% { transform: translate(-3px,-2px); } 80%% { transform: translate(2px,1px); } 100%% { transform: translate(0,0); } }
+@keyframes cine-entra { from { transform: translateX(60px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes cine-desliza { from { transform: translateX(-40px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes cine-llena { from { width: var(--desde, 0%%); } }
+@keyframes cine-cae { to { transform: translateY(420px) rotate(270deg); opacity: .2; } }
+.cine svg .cine-golpe, .cine svg .cine-aparece { transform-box: fill-box; transform-origin: center; }
+@media (prefers-reduced-motion: reduce) { .cine, .cine * { animation: none !important; } .cine-otra { display: none; } }
+</style>
+""" % {"pantalla": PANTALLA, "fondo": FONDO, "tinta": TINTA, "comal": COMAL, "sup": SUPERFICIE, "salsa_t": SALSA_TEXTO,
+       "nopal": NOPAL, "comal_t": COMAL_TEXTO}
+
+_CINE_JS = r"""
+<script>
+(function () {
+  if (window.__cine) return;
+  var RED = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  function qa(r, s) { return Array.prototype.slice.call(r.querySelectorAll(s)); }
+  function vivo(r, t) { return r.__tok === t; }
+  function luego(r, t, ms, fn) { setTimeout(function () { if (vivo(r, t)) fn(); }, ms); }
+  function anim(r, t, ms, fn, fin) {
+    var t0 = null;
+    function f(n) {
+      if (!vivo(r, t)) return;
+      if (t0 === null) t0 = n;
+      var p = Math.min(1, (n - t0) / ms);
+      fn(p);
+      if (p < 1) requestAnimationFrame(f); else if (fin) fin();
+    }
+    requestAnimationFrame(f);
+  }
+  var sal = function (p) { return 1 - Math.pow(1 - p, 3); };
+  var ent = function (p) { return p * p; };
+  function fmt(v, d, pre, suf) {
+    var s = Number(v).toFixed(d || 0).split('.');
+    s[0] = s[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    return (pre || '') + s.join('.') + (suf || '');
+  }
+  function temblar(r) { r.classList.remove('cine-tiembla'); void r.offsetWidth; r.classList.add('cine-tiembla'); }
+  function clase(el, c) { el.classList.remove(c); void el.getBoundingClientRect(); el.classList.add(c); }
+  function attr(el, n, d) { var v = el.getAttribute(n); return v === null ? d : v; }
+
+  // Cada paso: prep (deja el estado inicial) y run (anima y avisa al terminar).
+  var P = {
+    entrar: {
+      prep: function (r) { qa(r, '.cine-desliza').forEach(function (e) { e.classList.add('cine-oculto'); }); },
+      run: function (r, t, listo) {
+        qa(r, '.cine-desliza').forEach(function (e) { e.classList.remove('cine-oculto'); clase(e, 'cine-entra'); });
+        luego(r, t, 450, listo);
+      }
+    },
+    tipear: {
+      prep: function (r) { qa(r, '[data-texto]').forEach(function (e) { e.textContent = ''; }); },
+      run: function (r, t, listo) {
+        var ls = qa(r, '[data-texto]'), i = 0;
+        (function sig() {
+          if (!vivo(r, t)) return;
+          if (i >= ls.length) return listo();
+          var el = ls[i++], tx = el.getAttribute('data-texto'), k = 0;
+          var id = setInterval(function () {
+            if (!vivo(r, t)) { clearInterval(id); return; }
+            k += 2; el.textContent = tx.slice(0, k);
+            if (k >= tx.length) { clearInterval(id); luego(r, t, 320, sig); }
+          }, 26);
+        })();
+      }
+    },
+    cascada: {
+      prep: function (r) { qa(r, '[data-f]').forEach(function (e) { e.style.opacity = 0; }); },
+      run: function (r, t, listo) {
+        var bs = qa(r, '[data-f]'), f0 = -1;
+        anim(r, t, 900, function (p) {
+          var f = Math.floor(p * 10.99);
+          if (f === f0) return; f0 = f;
+          bs.forEach(function (e) { e.style.opacity = (+e.getAttribute('data-f') < f) ? 1 : 0; });
+        }, function () { bs.forEach(function (e) { e.style.opacity = 1; }); listo(); });
+      }
+    },
+    marcar: {
+      prep: function (r) {
+        qa(r, '[data-g]').forEach(function (e) { e.style.opacity = 0; });
+        qa(r, '[data-cont]').forEach(function (e) { e.textContent = attr(e, 'data-pre', '') + '0'; });
+      },
+      run: function (r, t, listo) {
+        var cs = qa(r, '[data-cont]'), grupos = {};
+        qa(r, '[data-g]').forEach(function (e) { (grupos[e.getAttribute('data-g')] = grupos[e.getAttribute('data-g')] || []).push(e); });
+        var ms = +attr(r, 'data-ms', 3200), n0 = {};
+        anim(r, t, ms, function (p) {
+          var q = p < .5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+          Object.keys(grupos).forEach(function (g) {
+            var ls = grupos[g], n = Math.round(q * ls.length);
+            for (var i = n0[g] || 0; i < n; i++) ls[i].style.opacity = 1;
+            n0[g] = Math.max(n0[g] || 0, n);
+          });
+          cs.forEach(function (c) { c.textContent = fmt(q * +c.getAttribute('data-v'), +attr(c, 'data-dec', 0), attr(c, 'data-pre', ''), ''); });
+        }, function () {
+          cs.forEach(function (c) { c.textContent = c.getAttribute('data-fin'); });
+          temblar(r); listo();
+        });
+      }
+    },
+    crecer: {
+      prep: function (r) {
+        qa(r, '.cine-barra').forEach(function (e) { e.setAttribute('y', e.getAttribute('data-base')); e.setAttribute('height', 0); });
+        qa(r, '.cine-val').forEach(function (e) { e.textContent = ''; });
+        qa(r, '.cine-tras, .cine-chk').forEach(function (e) { e.style.opacity = 0; });
+      },
+      run: function (r, t, listo) {
+        var bs = qa(r, '.cine-barra'), vs = qa(r, '.cine-val'), n = 0;
+        var orden = {};
+        bs.forEach(function (b, k) { var i = +b.getAttribute('data-i'); (orden[i] = orden[i] || []).push(k); });
+        var pasos = Object.keys(orden).map(Number).sort(function (a, b) { return a - b; });
+        if (!pasos.length) return listo();
+        var paso = +attr(r, 'data-paso', 170);
+        pasos.forEach(function (i, j) {
+          luego(r, t, j * paso, function () {
+            orden[i].forEach(function (k) {
+              var b = bs[k], v = vs[k], base = +b.getAttribute('data-base'), h = +b.getAttribute('data-h');
+              anim(r, t, 480, function (p) {
+                var hh = h * sal(p);
+                b.setAttribute('y', base - hh); b.setAttribute('height', hh);
+                if (v) v.textContent = fmt(+v.getAttribute('data-v') * sal(p), +attr(v, 'data-dec', 0), '', attr(v, 'data-suf', ''));
+              });
+            });
+            qa(r, '.cine-tras[data-tras="' + i + '"]').forEach(function (d) { luego(r, t, 480, function () { d.style.opacity = 1; clase(d, 'cine-aparece'); temblar(r); }); });
+            if (j === pasos.length - 1) luego(r, t, 560, function () {
+              qa(r, '.cine-chk').forEach(function (c, z) { luego(r, t, z * 120, function () { c.style.opacity = 1; clase(c, 'cine-aparece'); }); });
+              luego(r, t, 400, listo);
+            });
+          });
+        });
+      }
+    },
+    llover: {
+      prep: function (r) { qa(r, '.cine-gota').forEach(function (e) { e.style.opacity = 0; }); qa(r, '.cine-real').forEach(function (e) { e.style.opacity = 0; }); },
+      run: function (r, t, listo) {
+        var gs = qa(r, '.cine-gota'), N = gs.length, total = 2600;
+        var ys = gs.map(function (g) { return +g.getAttribute('y'); });
+        var inicio = gs.map(function (g) { return (+g.getAttribute('data-o') / Math.max(1, N)) * (total - 380); });
+        anim(r, t, total, function (p) {
+          var T = p * total;
+          for (var i = 0; i < N; i++) {
+            var q = (T - inicio[i]) / 380;
+            if (q <= 0) continue;
+            q = Math.min(1, q);
+            gs[i].style.opacity = 1;
+            gs[i].setAttribute('y', -6 + (ys[i] + 6) * ent(q));
+          }
+        }, function () {
+          gs.forEach(function (g, i) { g.setAttribute('y', ys[i]); g.style.opacity = 1; });
+          luego(r, t, 300, function () {
+            qa(r, '.cine-real').forEach(function (e) { e.style.opacity = 1; clase(e, 'cine-aparece'); });
+            temblar(r); listo();
+          });
+        });
+      }
+    },
+    camino: {
+      prep: function (r) { qa(r, '.cine-paso').forEach(function (e) { e.style.opacity = 0; }); qa(r, '.cine-viajero').forEach(function (e) { e.style.opacity = 0; }); },
+      run: function (r, t, listo) {
+        var ps = qa(r, '.cine-paso');
+        ps.forEach(function (e, i) { luego(r, t, i * 420, function () { e.style.opacity = 1; clase(e, 'cine-aparece'); }); });
+        luego(r, t, ps.length * 420 + 200, function () {
+          var v = r.querySelector('.cine-viajero');
+          if (!v) return listo();
+          var pts = v.getAttribute('data-pts').split(' ').map(function (s) { var a = s.split(','); return [+a[0], +a[1]]; });
+          v.style.opacity = 1;
+          var vueltas = 0;
+          (function vuelta() {
+            if (!vivo(r, t) || vueltas++ >= 4) return;
+            anim(r, t, 2400, function (p) {
+              var x = p * (pts.length - 1), i = Math.min(pts.length - 2, Math.floor(x)), f = x - i;
+              v.setAttribute('x', Math.round(pts[i][0] + (pts[i + 1][0] - pts[i][0]) * f));
+              v.setAttribute('y', Math.round(pts[i][1] + (pts[i + 1][1] - pts[i][1]) * f));
+            }, function () { luego(r, t, 500, vuelta); });
+          })();
+          listo();
+        });
+      }
+    },
+    contar: {
+      prep: function (r) { qa(r, '.cine-num[data-v]').forEach(function (e) { e.textContent = fmt(0, +attr(e, 'data-dec', 0), attr(e, 'data-pre', ''), attr(e, 'data-suf', '')); }); },
+      run: function (r, t, listo) {
+        var es = qa(r, '.cine-num[data-v]');
+        anim(r, t, 1500, function (p) {
+          es.forEach(function (e) { e.textContent = fmt(+e.getAttribute('data-v') * sal(p), +attr(e, 'data-dec', 0), attr(e, 'data-pre', ''), attr(e, 'data-suf', '')); });
+        }, listo);
+      }
+    },
+    sellar: {
+      prep: function (r) { qa(r, '.cine-sello').forEach(function (e) { e.style.opacity = 0; }); },
+      run: function (r, t, listo) {
+        qa(r, '.cine-sello').forEach(function (e) { e.style.opacity = ''; clase(e, 'cine-golpe'); });
+        luego(r, t, 260, function () { temblar(r); listo(); });
+      }
+    },
+    aparecer: {
+      prep: function (r) { qa(r, '.cine-pop').forEach(function (e) { e.style.opacity = 0; }); },
+      run: function (r, t, listo) {
+        var es = qa(r, '.cine-pop');
+        es.forEach(function (e, i) { luego(r, t, i * 140, function () { e.style.opacity = 1; clase(e, 'cine-aparece'); }); });
+        luego(r, t, es.length * 140 + 200, listo);
+      }
+    },
+    confeti: {
+      prep: function () {},
+      run: function (r, t, listo) {
+        var cols = (attr(r, 'data-colores', '#f4a63b,#4fb06d,#6f7ee8,#ff9db0')).split(',');
+        for (var i = 0; i < 36; i++) {
+          var c = document.createElement('i');
+          c.className = 'cine-confeti';
+          c.style.left = (Math.random() * 96 + 2) + '%';
+          c.style.background = cols[i % cols.length];
+          c.style.animationDelay = (Math.random() * .6) + 's';
+          r.appendChild(c);
+        }
+        luego(r, t, 2400, function () { qa(r, '.cine-confeti').forEach(function (c) { c.remove(); }); });
+        listo();
+      }
+    }
+  };
+
+  function correr(r) {
+    if (!r) return;
+    var pasos = (r.getAttribute('data-pasos') || '').split(' ').filter(function (p) { return P[p]; });
+    if (RED || !pasos.length) return;
+    var t = r.__tok = (r.__tok || 0) + 1;
+    r.classList.add('cine-js');
+    qa(r, '.cine-confeti').forEach(function (c) { c.remove(); });
+    pasos.forEach(function (p) { P[p].prep(r); });
+    var i = 0;
+    (function sig() { if (!vivo(r, t) || i >= pasos.length) return; P[pasos[i++]].run(r, t, sig); })();
+  }
+  window.__cine = { correr: correr };
+  document.addEventListener('click', function (e) {
+    var b = e.target && e.target.closest && e.target.closest('.cine-otra');
+    if (b) correr(b.closest('.cine'));
+  });
+})();
+</script>
+"""
+
+
+def _r(x, y, w, h, c, extra=""):
+    return '<rect x="%s" y="%s" width="%s" height="%s" fill="%s"%s/>' % (_n(x), _n(y), _n(w), _n(h), c, (" " + extra) if extra else "")
+
+
+def _n(v):
+    return ("%.2f" % v).rstrip("0").rstrip(".") if isinstance(v, float) else str(v)
+
+
+def _tx(x, y, texto, tam, color, ancla="middle", pixel=True, extra=""):
+    familia = "'Press Start 2P', monospace" if pixel else "'Atkinson Hyperlegible', sans-serif"
+    return ('<text x="%s" y="%s" font-size="%s" fill="%s" text-anchor="%s" font-family="%s"%s>%s</text>'
+            % (_n(x), _n(y), _n(tam), color, ancla, familia, (" " + extra) if extra else "", esc(texto)))
+
+
+def _carpeta(codigo):
+    """Expediente pixelado (60 x 44) con la etiqueta del caso."""
+    return ('<svg viewBox="0 0 60 44" role="img" aria-label="Expediente del caso %s">' % esc(codigo) +
+            _r(4, 4, 20, 6, "#c29a4a") + _r(2, 8, 56, 34, MANILA) + _r(2, 8, 56, 2, "#f2dc9e") + _r(2, 40, 56, 2, "#b8974f") +
+            _r(9, 17, 42, 11, PAPEL) + _tx(30, 25, "CASO " + codigo, 4.2, TINTA) + "</svg>")
+
+
+class _Cine:
+    """Escenas animadas para el cuaderno. Cada método muestra una pantalla y no devuelve nada."""
+
+    def _mostrar(self, cuerpo, pasos, clase="", titulo=None, extra="", repetir=True):
+        import uuid
+        from IPython.display import HTML, display
+        ident = "cine-" + uuid.uuid4().hex[:10]
+        boton = '<button class="cine-otra" type="button" aria-label="Ver la animación otra vez">&#8635; OTRA VEZ</button>' if (repetir and pasos) else ""
+        cabeza = '<p class="cine-t">%s</p>' % esc(titulo) if titulo else ""
+        if "cine-sello" in cuerpo:
+            clase += " con-sello"
+        html = ('<div class="cine %s" id="%s" data-pasos="%s"%s>%s%s%s</div>'
+                % (clase, ident, " ".join(pasos), (" " + extra) if extra else "", boton, cabeza, cuerpo))
+        script = "<script>window.__cine && window.__cine.correr(document.getElementById('%s'));</script>" % ident
+        display(HTML(_CSS + _CINE_CSS + '<div class="tdd">' + html + "</div>" + _CINE_JS + script))
+
+    # -- piezas de narración ---------------------------------------------------
+    def nivel(self, titulo, n=None, total=None):
+        """Franja de inicio de sección: NIVEL n/total, título y barra de avance que se llena."""
+        chip = '<span class="cine-chip">NIVEL %d/%d</span>' % (n, total) if n and total else '<span class="cine-chip">NIVEL</span>'
+        barra = ""
+        if n and total:
+            barra = '<div class="cine-prog" aria-hidden="true"><i style="width:%d%%;--desde:%d%%"></i></div>' % (
+                round(100 * n / total), round(100 * (n - 1) / total))
+        self._mostrar(chip + '<p class="cine-t">%s</p>' % esc(titulo) + barra, [], "cine-nivel", repetir=False)
+
+    def portada(self, codigo, titulo, lineas, sello="EN INVESTIGACION"):
+        """Abre el expediente del caso: el que la intro de la página dejó «sin resolver»."""
+        texto = "".join('<p data-texto="%s">%s</p>' % (esc(l), esc(l)) for l in lineas)
+        cuerpo = ('<div class="cine-fila"><div class="cine-desliza" style="width:170px">%s</div><div class="cine-texto">%s</div></div>'
+                  '<div class="cine-sello" style="color:%s">%s</div>' % (_carpeta(codigo), texto, COMAL, esc(sello)))
+        self._mostrar(cuerpo, ["entrar", "tipear", "sellar"], titulo=titulo)
+
+    def expediente(self, titulo, filas, sello="CONFIDENCIAL"):
+        """Ficha que se escribe sola, renglón por renglón, y termina con un sello."""
+        texto = "".join('<p><b>%s</b> <span data-texto="%s">%s</span></p>' % (esc(k), esc(v), esc(v)) for k, v in filas)
+        cuerpo = ('<div class="cine-desliza" style="background:%s;color:%s;border:4px solid %s;padding:14px 16px 6px">%s</div>'
+                  '<div class="cine-sello" style="color:%s">%s</div>' % (PAPEL, TINTA, MANILA, texto, SALSA, esc(sello)))
+        self._mostrar(cuerpo, ["entrar", "tipear", "sellar"], titulo=titulo)
+
+    def sospechoso(self, nombre, idea, prueba, veredicto="DESCARTADO"):
+        """Interrogatorio: la idea y la prueba se escriben solas y cae el sello del veredicto."""
+        cuerpo = ('<p><b>La idea:</b> <span data-texto="%s">%s</span></p><p><b>La prueba:</b> '
+                  '<span data-texto="%s">%s</span></p><div class="cine-sello" style="color:%s">%s</div>'
+                  % (esc(idea), esc(idea), esc(prueba), esc(prueba), SALSA, esc(veredicto)))
+        self._mostrar(cuerpo, ["tipear", "sellar"], "cine-claro", titulo="SOSPECHOSO: " + nombre)
+
+    def sello(self, texto, detalle="", color=NOPAL):
+        """Sello grande que cae con sacudida (veredicto, logro)."""
+        cuerpo = ('<p style="margin:0;padding-right:128px;min-height:1.5em">%s</p><div class="cine-sello" style="color:%s;left:22px;right:auto">%s</div>'
+                  % (esc(detalle), color, esc(texto)))
+        self._mostrar(cuerpo, ["sellar"])
+
+    def cierre(self, codigo, titulo, lineas, sello="RESUELTO"):
+        """Cierre del caso: el expediente se sella como resuelto, con confeti."""
+        texto = "".join('<p data-texto="%s">%s</p>' % (esc(l), esc(l)) for l in lineas)
+        cuerpo = ('<div class="cine-fila"><div class="cine-desliza" style="width:170px">%s</div><div class="cine-texto">%s</div></div>'
+                  '<div class="cine-sello" style="color:%s">%s</div>' % (_carpeta(codigo), texto, NOPAL, esc(sello)))
+        self._mostrar(cuerpo, ["entrar", "tipear", "sellar", "confeti"], titulo=titulo)
+
+    def contador(self, valor, texto, decimales=0, prefijo="", sufijo="", color=COMAL, titulo=None):
+        """Número grande que sube desde cero."""
+        cuerpo = ('<div class="cine-num" style="color:%s" data-v="%s" data-dec="%d" data-pre="%s" data-suf="%s">%s</div><p class="cine-pie">%s</p>'
+                  % (color, valor, decimales, esc(prefijo), esc(sufijo),
+                     esc(prefijo + ("{:,.%df}" % decimales).format(valor) + sufijo), esc(texto)))
+        self._mostrar(cuerpo, ["contar"], titulo=titulo)
+
+    # -- piezas con datos ------------------------------------------------------
+    def tablero(self, titulo, grupos, unidad="", pie="", ms=3200):
+        """Rejillas de 100 cuadros, una por grupo: cada cuadro es una persona; los marcados se encienden al azar.
+
+        grupos: lista de dict(etq, valor 0..1, texto final del contador, marca, base, con_marca, prefijo, decimales).
+        El contador termina en `texto`, que debe ser la cifra honesta (p. ej. «MENOS DE 3»), nunca un redondeo engañoso.
+        """
+        import random
+        ancho = 80 * len(grupos)
+        s = ['<svg viewBox="0 0 %d 80" role="img" aria-label="%s">' % (ancho, esc(
+            "; ".join("%s: %s" % (g["etq"], g.get("texto", "")) for g in grupos)))]
+        for gi, g in enumerate(grupos):
+            x0, y0 = 15 + gi * 80, 4
+            base, marca = g.get("base", CASILLA), g.get("marca", COMAL)
+            for k in range(100):
+                s.append(_r(x0 + (k % 10) * 5, y0 + (9 - k // 10) * 5, 4, 4, base, 'data-f="%d"' % (k // 10)))
+            exacto = max(0.0, min(1.0, float(g["valor"]))) * 100
+            llenos, parcial = int(exacto), exacto - int(exacto)
+            orden = list(range(100))
+            random.Random(g.get("semilla", 7 + gi)).shuffle(orden)
+            for q in range(llenos + (1 if parcial > 0.05 and llenos < 100 else 0)):
+                k = orden[q]
+                x, y = x0 + (k % 10) * 5, y0 + (9 - k // 10) * 5
+                w = 4 if q < llenos else round(4 * parcial, 2)
+                hueco = _r(x + 1, y + 1, 2, 2, PANTALLA) if (q < llenos and g.get("con_marca")) else ""
+                s.append('<g data-g="%d">%s%s</g>' % (gi, _r(x, y, w, 4, marca), hueco))
+            s.append(_tx(x0 + 25, 63, g["etq"], 4.2, "#cfd6ea"))
+            fin = g.get("texto") or ("%s %s" % (round(exacto, g.get("decimales", 0)), unidad)).strip()
+            s.append(_tx(x0 + 25, 74, fin, 5, FONDO, extra='data-cont="1" data-v="%s" data-dec="%d" data-pre="%s" data-fin="%s"' % (
+                round(exacto, 3), g.get("decimales", 0), esc(g.get("prefijo", "")), esc(fin))))
+        s.append("</svg>")
+        self._mostrar("".join(s) + ('<p class="cine-pie">%s</p>' % esc(pie) if pie else ""), ["cascada", "marcar"],
+                      titulo=titulo, extra='data-ms="%d"' % ms)
+
+    def barras(self, titulo, categorias, series, colores=None, sufijo="%", decimales=0, divisor=None, ganador=False,
+               ymax=None, pie="", paso=170):
+        """Barras que crecen una tras otra, con su valor contando hacia arriba.
+
+        series: lista de (nombre, valores, color). colores: color por categoría (solo con una serie).
+        divisor: (después de la categoría i, texto): línea punteada que cae cuando la animación pasa por ahí.
+        ganador: marca con ✓ la barra más alta de cada categoría.
+        """
+        nc, ns = len(categorias), len(series)
+        alto_max = ymax or max(max(v) for _, v, _ in series) * 1.15 or 1
+        x0, x1, base, techo = 8, 192, 70, 12
+        ancho_g = (x1 - x0) / nc
+        ancho_b = ancho_g * (0.72 if ns == 1 else 0.84) / ns
+        s = ['<svg viewBox="0 0 200 %d" role="img" aria-label="%s">' % (90 if ns == 1 else 96, esc(titulo + ". " + "; ".join(
+            "%s: %s" % (c, ", ".join("%s %s" % (n, ("{:.%df}" % decimales).format(v[i]) + sufijo) for n, v, _ in series))
+            for i, c in enumerate(categorias))))]
+        s.append(_r(x0, base, x1 - x0, 1, "#cfd6ea"))
+        for i, cat in enumerate(categorias):
+            cx = x0 + ancho_g * (i + 0.5)
+            mejor = None
+            if ganador and ns > 1:
+                orden = sorted(range(ns), key=lambda j: -series[j][1][i])
+                mejor = orden[0] if series[orden[0]][1][i] > series[orden[1]][1][i] else None  # empate: sin marca
+            for j, (nombre, valores, color) in enumerate(series):
+                v = valores[i]
+                h = max(0.0, (techo - base) * -1 * v / alto_max)
+                x = cx - ancho_b * ns / 2 + j * ancho_b
+                c = colores[i] if (colores and ns == 1) else color
+                s.append(_r(round(x + 0.4, 2), round(base - h, 2), round(ancho_b - 0.8, 2), round(h, 2), c,
+                            'class="cine-barra" data-i="%d" data-base="%s" data-h="%s"' % (i, base, round(h, 2))))
+                etiqueta = ("{:.%df}" % decimales).format(v) + sufijo
+                s.append(_tx(x + ancho_b / 2, base - h - 2, etiqueta, 3.6 if ns == 1 and nc > 8 else (3.1 if ns * nc >= 10 else 4), FONDO,
+                             extra='class="cine-val" data-v="%s" data-dec="%d" data-suf="%s"' % (v, decimales, esc(sufijo))))
+                if mejor == j:
+                    s.append(_tx(x + ancho_b / 2, base - h - 8, "OK", 3.4, NOPAL, extra='class="cine-chk"'))
+            s.append(_tx(cx, base + 7, cat, 5 if len(str(cat)) <= 6 else 4.2, "#cfd6ea", pixel=False))
+        if divisor:
+            i, texto = divisor
+            dx = x0 + ancho_g * (i + 1)
+            s.append('<g class="cine-tras" data-tras="%d">%s%s</g>' % (
+                i, "".join(_r(dx - 0.5, y, 1, 2, COMAL) for y in range(techo - 4, base, 4)), _tx(dx + 2, techo - 2, texto, 3.6, COMAL, "start")))
+        if ns > 1:
+            lx = x0
+            for nombre, _, color in series:
+                s.append(_r(lx, 86, 5, 5, color) + _tx(lx + 7, 90.5, nombre, 5, FONDO, "start", pixel=False))
+                lx += 9 + len(nombre) * 3.2
+        s.append("</svg>")
+        self._mostrar("".join(s) + ('<p class="cine-pie">%s</p>' % esc(pie) if pie else ""), ["crecer"], titulo=titulo,
+                      extra='data-paso="%d"' % paso)
+
+    def lluvia(self, valores, real, titulo, rango, bins=30, unidad="", pie="", texto_real=None):
+        """Cada resultado simulado cae como un cuadrito en su columna; al final cae el valor real."""
+        import random
+        lo, hi = rango
+        cuenta = [0] * bins
+        for v in valores:
+            if lo <= v < hi:
+                cuenta[min(bins - 1, int((v - lo) / (hi - lo) * bins))] += 1
+        x0, x1, base = 8, 192, 70
+        ancho = (x1 - x0) / bins
+        por_cuadro = max(1, -(-max(cuenta) // 26))
+        gotas = []
+        for b, n in enumerate(cuenta):
+            for k in range(-(-n // por_cuadro)):
+                gotas.append((x0 + b * ancho + 0.3, base - 2.2 * (k + 1)))
+        orden = list(range(len(gotas)))
+        random.Random(1847).shuffle(orden)
+        s = ['<svg viewBox="0 0 200 86" role="img" aria-label="%s">' % esc(
+            "%s. %d resultados simulados entre %s y %s; el valor real es %s." % (titulo, len(valores), lo, hi, real))]
+        s.append(_r(x0, base, x1 - x0, 1, "#cfd6ea"))
+        for k in range(int(lo), int(hi) + 1):
+            x = x0 + (k - lo) / (hi - lo) * (x1 - x0)
+            s.append(_r(x, base + 1, 1, 2, "#cfd6ea") + _tx(x, base + 8, str(k), 3.6, "#cfd6ea"))
+        for (x, y), o in zip(gotas, orden):
+            s.append(_r(round(x, 2), round(y, 2), round(ancho - 0.6, 2), 1.8, NOPAL, 'class="cine-gota" data-o="%d"' % o))
+        rx = x0 + (real - lo) / (hi - lo) * (x1 - x0)
+        s.append('<g class="cine-real">%s%s</g>' % (_r(round(rx - 0.8, 2), 10, 1.6, base - 10, SALSA),
+                                                     _tx(rx - 2, 9, texto_real or "REAL: %s" % real, 4, SALSA, "end")))
+        if unidad:
+            s.append(_tx(100, 84, unidad, 4.4, "#cfd6ea", pixel=False))
+        s.append("</svg>")
+        nota = "Cada cuadrito es %s." % ("un mundo" if por_cuadro == 1 else "%d mundos" % por_cuadro)
+        self._mostrar("".join(s) + '<p class="cine-pie">%s %s</p>' % (esc(nota), esc(pie)), ["llover"], titulo=titulo)
+
+    def camino(self, titulo, pasos, pie=""):
+        """Cajas que aparecen una tras otra unidas por flechas; un punto recorre el camino."""
+        n = len(pasos)
+        ancho = 200 / n
+        s = ['<svg viewBox="0 0 200 64" role="img" aria-label="%s">' % esc(titulo + ": " + " → ".join(t for t, _ in pasos))]
+        pts = []
+        for i, (texto, color) in enumerate(pasos):
+            x = i * ancho + 4
+            w = ancho - 14
+            claro = color in (COMAL, NOPAL, ANIL, ROSA, FONDO, MANILA)
+            lineas = texto.split("\n") if "\n" in texto else ([texto] if len(texto) < 14 else texto.split(" ", 1))
+            caja = _r(x, 14, w, 34, color) + _r(x, 14, w, 2, "rgba(255,255,255,.25)")
+            for k, l in enumerate(lineas[:2]):
+                caja += _tx(x + w / 2, 31 + (k - (len(lineas[:2]) - 1) / 2) * 7, l, 6, TINTA if claro else FONDO, pixel=False,
+                            extra='font-weight="700"')
+            flecha = ""
+            if i < n - 1:
+                ax = x + w + 2
+                flecha = (_r(ax, 30, 5, 2, FONDO) + _r(ax + 5, 27, 1, 8, FONDO) + _r(ax + 6, 28, 1, 6, FONDO)
+                          + _r(ax + 7, 29, 1, 4, FONDO) + _r(ax + 8, 30, 1, 2, FONDO))
+            s.append('<g class="cine-paso">%s%s</g>' % (caja, flecha))
+            pts.append("%d,%d" % (round(x + w / 2), 53))
+        s.append("".join(_r(x, 54.5, 1, 1, "#5a6385") for x in range(round(4 + (ancho - 14) / 2), round(200 - ancho + 4 + (ancho - 14) / 2), 3)))
+        s.append(_r(round(4 + (ancho - 14) / 2), 53, 4, 4, SALSA, 'class="cine-viajero" data-pts="%s"' % " ".join(pts)))
+        s.append("</svg>")
+        self._mostrar("".join(s) + ('<p class="cine-pie">%s</p>' % esc(pie) if pie else ""), ["camino"], titulo=titulo)
+
+    def bits(self, n, texto="bits ganados"):
+        """Monedas y contador de bits (se usa al superar un reto)."""
+        monedas = "".join('<span class="cine-moneda cine-pop"></span>' for _ in range(min(10, max(1, int(n) // 10 or 1))))
+        cuerpo = ('<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap"><div class="cine-num" data-v="%d" data-pre="+">+%d</div>'
+                  '<div><p style="margin:0 0 6px">%s</p>%s</div></div>' % (int(n), int(n), esc(texto), monedas))
+        self._mostrar(cuerpo, ["aparecer", "contar", "confeti"], extra='data-colores="%s,%s"' % (COMAL, "#ffd98a"), repetir=False)
+
+
+cine = _Cine()
+
+
 # --------------------------------------------------------------------------- conexión
 
 class ErrorBackend(Exception):
@@ -267,6 +811,9 @@ class Sesion:
         self._retos = None
         self._vistas = set()
         self.etiquetas = {}
+        # [(sección, título en letra pixel)] en orden; lo pone el cuaderno (cuadernos de 0.6.0 en adelante).
+        # Con él, cada sección abre con su franja animada «NIVEL n/total».
+        self.niveles = None
 
     # -- HTTP --------------------------------------------------------------
     def _http(self, metodo, ruta, cuerpo=None, prefer=None, reintento=True, intentos=3):
@@ -488,8 +1035,14 @@ class Sesion:
         return self._vaciar(forzar=True)
 
     def seccion(self, nombre):
-        """Marca una sección como vista y, en modo docente, muestra su nota."""
+        """Marca una sección como vista, muestra su franja de nivel y, en modo docente, su nota."""
         self.registrar(nombre, "seccion")
+        claves = [x[0] for x in (self.niveles or [])]
+        if nombre in claves and claves.index(nombre) > 0:
+            try:
+                cine.nivel(dict(self.niveles)[nombre], claves.index(nombre) + 1, len(claves))
+            except Exception:
+                pass
         self.nota(nombre)
 
     def respuesta(self, pregunta, texto, etapa=None):
@@ -574,7 +1127,9 @@ class Sesion:
         nivel = "<span title='Dificultad %d de 3'>%s</span>" % (dif, "★" * dif + "☆" * (3 - dif))
         pista_html = "<p><b>Pista:</b> %s</p>" % esc(pista) if pista else ""
         expl = "<p><b>Por qué:</b> %s</p>" % esc(r["explicacion"]) if r.get("explicacion") else ""
+        ganados = 0
         if r.get("acierto") and primer == n:
+            ganados = int(r.get("bits") or 0)
             titulo, color = "¡Reto superado!", NOPAL_TEXTO
             cuerpo = ("<p><span class='tdd-cifra'>+%d</span> bits</p><p>%s Acertaste en tu %s intento%s.</p>%s" % (
                 r.get("bits", 0), nivel, _ORDINAL.get(n, "%d.º" % n),
@@ -596,6 +1151,11 @@ class Sesion:
             cuerpo = ("<p>Intento %d. Después de cinco intentos el reto ya no da bits, pero puedes seguir intentando para aprenderlo.</p>%s%s"
                       % (n, pista_html, expl))
         mostrar(tarjeta(titulo, cuerpo, color))
+        if ganados > 0:
+            try:
+                cine.bits(ganados)
+            except Exception:
+                pass
 
     def _nota_reto(self, reto):
         """Modo docente: respuesta correcta y cómo le va al grupo en ese reto."""
